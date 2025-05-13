@@ -7,7 +7,7 @@ on:
       type_file:
         description: "Select type file"
         required: false
-        default: "img.gz"
+        default: "img.xz"
         type: choice
         options:
           - img.xz
@@ -16,8 +16,8 @@ on:
         description: "Set the url img file"
         required: true
         default: ""
-      rename_rootfs:
-        description: "Rename rootfs"
+      rename:
+        description: "Set the boot & rootfs name"
         required: true
         default: ""
 
@@ -26,7 +26,9 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout
@@ -36,75 +38,82 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get -qq update
         sudo -E apt-get -y install wget python3
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo pip3 install gdown
-        sudo pip3 install git+https://github.com/Juvenal-Yescas/mediafire-dl
-        wget https://mega.nz/linux/repo/xUbuntu_20.04/amd64/megacmd-xUbuntu_20.04_amd64.deb && sudo apt install "$PWD/megacmd-xUbuntu_20.04_amd64.deb"
+        curl https://sh.rustup.rs -sSf | sh -s -- -y
+        cargo install mediafire_rs
+        megacmd_ver=$(sudo cat /etc/*ease | grep "DISTRIB_RELEASE" | awk -F "=" '{print $2}')
+        wget https://mega.nz/linux/repo/xUbuntu_${megacmd_ver}/amd64/megacmd-xUbuntu_${megacmd_ver}_amd64.deb && sudo apt install "$PWD/megacmd-xUbuntu_${megacmd_ver}_amd64.deb"
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir/openwrt
-        sudo chown $USER:$GROUPS /workdir
 
-    - name: Download file ${{ github.event.inputs.type_file }}
-      working-directory: /workdir
+    - name: Download file ${{ inputs.type_file }}
       run: |
         df -hT $PWD
-        if [ $(echo ${{ github.event.inputs.img_url }} | grep "drive.") ]; then
-          if [ $(echo ${{ github.event.inputs.img_url }} | awk -F "/" '{print $6}') ]; then
-            link_gdrive=$(echo ${{ github.event.inputs.img_url }} | awk -F "/" '{print $6}')
+        if [ $(echo ${{ inputs.img_url }} | grep "drive.") ]; then
+          if [ $(echo ${{ inputs.img_url }} | awk -F "/" '{print $6}') ]; then
+            link_gdrive=$(echo ${{ inputs.img_url }} | awk -F "/" '{print $6}')
           else
-            link_gdrive=$(echo ${{ github.event.inputs.img_url }} | awk -F "/" '{print $4}' | awk -F "?id=" '{print $2}'|awk -F "&export" '{print $1}')
+            link_gdrive=$(echo ${{ inputs.img_url }} | awk -F "/" '{print $4}' | awk -F "?id=" '{print $2}'|awk -F "&export" '{print $1}')
           fi
-          sudo gdown ${link_gdrive} -O openwrt/file.${{ github.event.inputs.type_file }}
+          gdown ${link_gdrive} -O file.${{ inputs.type_file }}
         else
-          if [ $(echo ${{ github.event.inputs.img_url }} | grep "mediafire.com") ]; then
-            sudo mediafire-dl ${{ github.event.inputs.img_url }} -o openwrt/file.${{ github.event.inputs.type_file }}
+          if [ $(echo ${{ inputs.img_url }} | grep "mediafire.com") ]; then
+            mdrs ${{ inputs.img_url }}
+            ls -l 
+            mv *.${{ inputs.type_file }} file.${{ inputs.type_file }}
           else
-            if [ $(echo ${{ github.event.inputs.img_url }} | grep "mega.nz") ]; then
-              file_mega=$(sudo mega-get ${{ github.event.inputs.img_url }} | awk -F: '{print $2}')
-              sudo mv ${file_mega} openwrt/file.${{ github.event.inputs.type_file }}
+            if [ $(echo ${{ inputs.img_url }} | grep "mega.nz") ]; then
+              file_mega=$(mega-get ${{ inputs.img_url }} | awk -F: '{print $2}')
+              mv ${file_mega} file.${{ inputs.type_file }}
             else
-              sudo wget --no-check-certificate ${{ github.event.inputs.img_url }} -O openwrt/file.${{ github.event.inputs.type_file }}
+              wget --no-check-certificate ${{ inputs.img_url }} -O file.${{ inputs.type_file }}
             fi
           fi
         fi
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: Extract firmware
       id: extract
       run: |
-        cd openwrt
-        sudo mkdir -p boot rootfs img
-        if [ ${{ github.event.inputs.type_file }} = "img.gz" ]; then
-          sudo gunzip file.img.gz
-        else
-          sudo unxz file.img.xz
+        mkdir -p boot rootfs img
+        if [ ${{ inputs.type_file }} = "img.gz" ]; then
+          gunzip file.img.gz
+        elif [ ${{ inputs.type_file }} = "img.xz" ]; then
+          unxz file.img.xz
         fi
         los=$(sudo losetup -fP --show file.img)
+        sudo mount ${los}p1 boot
         sudo mount ${los}p2 rootfs
-        (cd rootfs && sudo rm -R lib/modules && sudo rm -R lib/firmware && sudo tar cfz /workdir/openwrt/img/${{ inputs.rename_rootfs }}.tar.gz *)
-        echo "::set-output name=status::success"
-        
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+        (cd boot && sudo tar cfz ../img/${{ inputs.rename }}-boot.tar.gz *)
+        (cd rootfs && sudo tar cfz ../img/${{ inputs.rename }}-rootfs.tar.gz *)
+        echo "PACKAGED_OUTPUTTAGS=${{ inputs.rename }}" >> ${GITHUB_ENV}
+        echo "PACKAGED_OUTPUTPATH=./img/*" >> ${GITHUB_ENV}
+        echo "PACKAGED_OUTPUTDATE=$(date +"%m.%d.%H%M")" >> ${GITHUB_ENV}
+        echo "PACKAGED_STATUS=success" >> ${GITHUB_ENV}
+
+    - name: Upload ${{ inputs.rename }}-boot.tar.gz
+      uses: actions/upload-artifact@main
+      if: env.PACKAGED_STATUS == 'success'
+      with:
+        name: ${{ inputs.rename }}-boot.tar.gz
+        path: ./img/${{ inputs.rename }}-boot.tar.gz
+
+    - name: Upload ${{ inputs.rename }}-rootfs.tar.gz
+      uses: actions/upload-artifact@main
+      if: env.PACKAGED_STATUS == 'success'
+      with:
+        name: ${{ inputs.rename }}-rootfs.tar.gz
+        path: ./img/${{ inputs.rename }}-rootfs.tar.gz
 
     - name: Upload release asset
       uses: svenstaro/upload-release-action@v2
+      if: env.PACKAGED_STATUS == 'success'
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: openwrt/img/*
-        tag: ${{ github.ref }}
+        file: ${{ env.PACKAGED_OUTPUTPATH }}
+        tag: ${{ env.PACKAGED_OUTPUTDATE }}
         file_glob: true
         overwrite: true
-        body: |
-          ##  KUMPULAN HASIL MALINK ROOTFS
-
-    - name: Delete workflow runs
-      uses: GitRML/delete-workflow-runs@main
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
+        body: boot & rootfs
